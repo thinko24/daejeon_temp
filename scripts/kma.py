@@ -2,44 +2,55 @@
 """
 기상청 ASOS 일자료 조회 공통 모듈.
 대전(지점 133)의 날짜별 평균/최저/최고 기온을 받아온다.
-서울 csv와 열 구조를 똑같이 맞춘다: 날짜, 지점, 평균기온, 최저기온, 최고기온
 """
 import os
 import time
 import requests
 import pandas as pd
 
-# 공공데이터포털에서 발급받은 "디코딩(Decoding) 인증키"를 환경변수로 전달받는다.
 SERVICE_KEY = os.environ["DATA_GO_KR_KEY"]
 
-STN_ID = "133"  # 대전 관측소 지점번호 (서울은 108)
-URL = "http://apis.data.go.kr/1360000/AsosDalyInfoService/getWthrDataList"
+STN_ID = "133"  # 대전 (서울은 108)
+# https 로 접속(http/80 은 해외 서버에서 자주 타임아웃)
+URL = "https://apis.data.go.kr/1360000/AsosDalyInfoService/getWthrDataList"
 COLS = ["날짜", "지점", "평균기온", "최저기온", "최고기온"]
 
 
+def _get(params, retries=4):
+    """접속이 끊기면 몇 초 쉬었다 다시 시도(최대 retries회)."""
+    last_err = None
+    for i in range(retries):
+        try:
+            return requests.get(URL, params=params, timeout=60)
+        except requests.exceptions.RequestException as e:
+            last_err = e
+            wait = 5 * (i + 1)  # 5, 10, 15초... 점점 길게 대기
+            print(f"  접속 실패({i + 1}/{retries}) - {wait}초 후 재시도")
+            time.sleep(wait)
+    raise last_err
+
+
 def fetch_range(start_dt: str, end_dt: str) -> pd.DataFrame:
-    """start_dt, end_dt 는 'YYYYMMDD' 문자열. 해당 기간 대전 일별 기온을 DataFrame 으로 반환."""
     rows = []
     page = 1
     while True:
         params = {
             "serviceKey": SERVICE_KEY,
             "pageNo": page,
-            "numOfRows": 999,          # 한 번에 최대 999행
+            "numOfRows": 999,
             "dataType": "JSON",
             "dataCd": "ASOS",
-            "dateCd": "DAY",           # 일자료
+            "dateCd": "DAY",
             "startDt": start_dt,
             "endDt": end_dt,
             "stnIds": STN_ID,
         }
-        resp = requests.get(URL, params=params, timeout=30)
+        resp = _get(params)
         resp.raise_for_status()
 
         try:
             body = resp.json()["response"]["body"]
         except Exception:
-            # 인증키 오류 등으로 JSON 이 아니면 원문을 보여주고 중단
             raise RuntimeError(f"API 응답 파싱 실패: {resp.text[:300]}")
 
         items = body.get("items", "")
@@ -55,10 +66,10 @@ def fetch_range(start_dt: str, end_dt: str) -> pd.DataFrame:
                 "최고기온": it.get("maxTa", ""),
             })
 
-        total = int(body.get("totalCount", 0))
+        total = int(body.get("totalCount", 0) or 0)
         if page * 999 >= total:
             break
         page += 1
-        time.sleep(0.3)  # 서버 배려
+        time.sleep(0.3)
 
     return pd.DataFrame(rows, columns=COLS)
